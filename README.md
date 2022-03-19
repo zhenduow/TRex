@@ -5,9 +5,9 @@ Inside this repo is a RL agent class that support TRex reward estimation and PPO
 
 ## How to use it
 A typical call order of the functions in an epoch should be like:
-your_rollout_function()         # to get on-policy training data as well as the trajectories for reward estimation net training
-TRexAgent.trex_reward_update()  # to train the reward estimator
-TRexAgent.train_policy()        # to train actor critic (AC) policy network
-TRexAgent.train_value()         # to train AC value network
+* your_rollout_function()         # to get on-policy training data as well as the trajectories for reward estimation net training
+* TRexAgent.trex_reward_update()  # to train the reward estimator
+* TRexAgent.train_policy()        # to train actor critic (AC) policy network
+* TRexAgent.train_value()         # to train AC value network
 
 Please see the comments in each function for more information.
