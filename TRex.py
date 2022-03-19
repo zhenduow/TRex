@@ -13,10 +13,9 @@ import statistics
 
 class TRexAgent():
     '''
-    The multi-objective Inverse reinforcement learning Agent for conversational search.
-    This agent has multiple policies each represented by one <agent> object.
+    The TRex Inverse reinforcement learning Agent for conversational search.
     '''
-    def __init__(self, n_action, observation_dim, top_n, lr, lrdc, gamma, weight_decay, dropout_ratio, n_rewards, traj_sample_length, epsilon=1.0, eps_dec=1e-3, eps_min=0.01, max_experience_length = 8000,
+    def __init__(self, n_action, observation_dim, top_n, lr, lrdc, gamma, weight_decay, dropout_ratio, n_rewards, traj_sample_length, 
         ppo_clip_val = 0.2,
         kl_div_val = 0.01,
         max_policy_train_iter = 40,
@@ -24,6 +23,24 @@ class TRexAgent():
         policy_lr = 1e-4,
         value_lr = 1e-4,
         ):
+        '''
+        n_action:               action space dimension
+        observation_dim:        state space dimension
+        top_n:                  how many question/answers to use in policy model
+        lr:                     reward learning rate
+        lrdc:                   reward learning rate decay
+        gamma:                  discount factor
+        weight_decay:           optimizer weight decay
+        dropout_ratio:          reward estimation net dropout ratio
+        n_rewards:              the number of reward estimation net to ensemble
+        traj_sample_length:     the number of timesteps to sample for each reward estimation net
+        ppo_clip_val:           proximal policy optimization (PPO) clip value
+        kl_div_val:             KL divergence threshold
+        max_policy_train_iter:  kinda obvious
+        max_value_train_iter:   kinda obvious
+        policy_lr:              policy learning rate
+        value_lr:               value learning rate
+        '''
         self.lr = lr
         self.lrdc = lrdc
         self.weight_decay = weight_decay
@@ -32,25 +49,15 @@ class TRexAgent():
         self.loss = nn.MSELoss()    
         self.device = T.device('cuda' if T.cuda.is_available() else 'cpu')
         self.observation_dim = observation_dim
-        self.policy = LinearDeepNetwork(n_actions = n_action, input_dims = (2+2*self.top_n) * observation_dim + (2) * self.top_n)
+
         self.n_rewards = n_rewards
         self.reward = []
         for i in range(n_rewards):
             self.reward.append(LinearDeepNetwork_no_activation(n_actions = 1, input_dims = (2+self.top_n) * observation_dim + self.top_n, hidden_size = 256, dropout_ratio = dropout_ratio))
         self.traj_sample_length = traj_sample_length
-        self.policy_params = self.policy.parameters()
         self.reward_params = [self.reward[i].parameters() for i in range(n_rewards)]
         self.reward_optimizer = [optim.RMSprop(self.reward_params[i], lr=self.lr, weight_decay = self.weight_decay) for i in range(n_rewards)]
-        self.policy_optimizer = optim.RMSprop(self.policy_params, lr=self.lr, weight_decay = self.weight_decay)
         self.scheduler = [optim.lr_scheduler.ExponentialLR(self.reward_optimizer[i], gamma=self.lrdc) for i in range(n_rewards)]
-        self.expert_traj_history = []
-        self.self_traj_history = []
-        self.experiences = []
-        self.experiences_replay_times = 3
-        self.max_experience_length = max_experience_length
-        self.epsilon = epsilon
-        self.eps_dec = eps_dec
-        self.eps_min = eps_min
         self.gamma = gamma
         self.reward_history = {}
         for k in range(self.n_rewards):
@@ -69,36 +76,36 @@ class TRexAgent():
         self.value_optim = optim.Adam(value_params, lr=value_lr)
     
     def save(self, path):
-        T.save(self.policy.state_dict(), path+'_policy')
-        for i in range(self.n_rewards):
+        for i in range(n_rewards):
             T.save(self.reward[i].state_dict(), path+'_reward'+str(i))
         T.save(self.ac.state_dict(), path+'_ac')
     
     def load(self, path):
-        self.policy.load_state_dict(T.load(path+'_policy'))
-        for i in range(self.n_rewards):
+        for i in range(n_rewards):
             self.reward[i].load_state_dict(T.load(path+'_reward'+str(i)))
         self.ac.load_state_dict(T.load(path+'_ac'))
 
     def trex_reward_update(self, all_traj_pairs):
         '''
         Take a trex training step
+        all_traj_pairs is a list of trajectory pairs
+        each pair should be a list of length 2 which is [pos_traj, neg_traj]
+        both pos_traj and neg_traj should be a list of timesteps of a single rollout trajectory
         '''
         batch_loss = 0
         error = 0
         for k in range(self.n_rewards):
             L = T.zeros(1).to(self.device)
             for traj_pair in all_traj_pairs:
+                # process the pos and neg traj to remove overlap
                 pos_traj, neg_traj = [(traj[0].tolist(), traj[1]) for traj in traj_pair[0]], [(traj[0].tolist(), traj[1]) for traj in traj_pair[1]]
-                #print("pos",pos_traj)
-                #print("neg",neg_traj)
                 traj_sample_length = min(min(len(pos_traj), len(neg_traj)), self.traj_sample_length)
                 pos_traj, neg_traj = [(T.tensor(traj[0]).to(self.device), traj[1]) for traj in pos_traj if traj not in neg_traj], [(T.tensor(traj[0]).to(self.device), traj[1]) for traj in neg_traj if traj not in pos_traj]                #pos_traj = random.sample(pos_traj, traj_sample_length)
                 pos_traj = random.sample(pos_traj, traj_sample_length)
                 neg_traj = random.sample(neg_traj, traj_sample_length)
-                #print("random pos",pos_traj)
-                #print("random neg",neg_traj)
                 pos_input, neg_input = [], []
+
+                # special processing for my project
                 for i, row in enumerate(pos_traj):
                     context = row[0][:2*self.observation_dim]
                     candidate_start = 2 * self.observation_dim if int(row[1]) > 0  else (2 + self.top_n) * self.observation_dim
@@ -108,7 +115,6 @@ class TRexAgent():
                     candidate = T.cat((row[0][candidate_start: candidate_end], row[0][score_start: score_end]))
                     reward_input = T.cat((context, candidate))
                     pos_input.append(reward_input)
-
                 for i, row in enumerate(neg_traj):
                     context = row[0][:2*self.observation_dim]
                     candidate_start = 2 * self.observation_dim if int(row[1]) > 0  else (2 + self.top_n) * self.observation_dim
@@ -118,18 +124,17 @@ class TRexAgent():
                     candidate = T.cat((row[0][candidate_start: candidate_end], row[0][score_start: score_end]))
                     reward_input = T.cat((context, candidate))
                     neg_input.append(reward_input)
-
                 pos_input_tensor = T.stack(pos_input).to(self.device)
                 neg_input_tensor = T.stack(neg_input).to(self.device)
-            
+
+                # run the reward nets           
                 pos_output = self.reward[k].forward(pos_input_tensor)
                 neg_output = self.reward[k].forward(neg_input_tensor)
                 for error_iter in range(len(pos_output)):
                     if pos_output[error_iter] < neg_output[error_iter]:
                         error += 1
                 L -= T.log(T.exp(pos_output.sum()) / (T.exp(pos_output.sum()) + T.exp(neg_output.sum())))
-                #print(pos_output, neg_output)
-                #print("loss", L)
+
             self.reward_optimizer[k].zero_grad()
             L.backward(retain_graph = True)
             self.reward_optimizer[k].step()
@@ -141,8 +146,7 @@ class TRexAgent():
 
     def inference_step(self, query_embedding, context_embedding, questions_embeddings, answers_embeddings, questions_scores, answers_scores, mode):
         '''
-        The inference step of moirl agent first computes the posterior distribution of policies given existing conversation trajectory.
-        Then the distribution of policies can be used to compute a weighted reward function.
+        run the actor critic policy to generate an action, also returning the state for reuse
         '''
         encoded_state = T.cat((query_embedding, context_embedding), dim=0)
         for i in range(self.top_n):
@@ -156,10 +160,12 @@ class TRexAgent():
         action = T.argmax(pp).item()
         return state, action
 
-    def decrement_epsilon(self):
-        self.epsilon = self.epsilon - self.eps_dec if self.epsilon > self.eps_min else self.eps_min
-
     def estimate_reward(self, state, act):
+        '''
+        run the rewards to estimate the reward given state and act
+        '''
+        # special processing for my task to get act-masked state representation
+        # state_act is the input to my reward estimation net, you can generate your own representation for a (state,act) pair
         context = state[:2*self.observation_dim]
         candidate_start = 2 * self.observation_dim if act > 0  else (2 + self.top_n) * self.observation_dim
         candidate_end = candidate_start + self.top_n * self.observation_dim 
@@ -183,6 +189,13 @@ class TRexAgent():
         return reward  
     
     def train_policy(self, states, acts, old_log_probs, gaes):
+        '''
+        PPO policy update
+        states:         the states tensor
+        acts:           the action tensor
+        old_log_probs:  the Pi_old distribution tensor
+        gaes:           the GAE advantange estimator tensor
+        '''
         for _ in range(self.max_policy_train_iter):
             self.policy_optim.zero_grad()
             new_logits = self.ac.policy(states)
@@ -200,11 +213,16 @@ class TRexAgent():
             if kl_div >= self.kl_div_val:
                 break
 
-    def train_value(self, state, returns):
+    def train_value(self, states, returns):
+        '''
+        value update
+        states:    the states tensor
+        returns:   the returns tensor (see)
+        '''
         for _ in range(self.max_value_train_iter):
             self.value_optim.zero_grad()
 
-            values = self.ac.value(state)
+            values = self.ac.value(states)
             value_loss = (returns - values) ** 2
             value_loss = value_loss.mean()
 
